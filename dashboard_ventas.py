@@ -5,6 +5,8 @@ Ejecutar con:  streamlit run dashboard_ventas.py
 
 import re
 import io
+import json
+import base64
 from pathlib import Path
 
 import pandas as pd
@@ -16,21 +18,24 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
-# ─── Config ──────────────────────────────────────────────────────────────────
+# ─── Rutas de archivos ───────────────────────────────────────────────────────
 
-st.set_page_config(
-    page_title="Ventas GILSA S.A.S.",
-    page_icon="chart_with_upwards_trend",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+DATA_FILE   = Path(__file__).parent / "VENTAS_GILSA_CONSOLIDADO.xlsx"
+CONFIG_FILE = Path(__file__).parent / "config.json"
 
-DATA_FILE = Path(__file__).parent / "VENTAS_GILSA_CONSOLIDADO.xlsx"
+# ─── Configuracion por defecto ────────────────────────────────────────────────
 
-COLORES = {
-    "TOCARO":       "#2563EB",
-    "JUAN GABRIEL": "#16A34A",
-    "SIN ASIGNAR":  "#D97706",
+DEFAULT_CFG = {
+    "empresa_nombre": "GILSA S.A.S.",
+    "empresa_nit":    "900.007.450-8",
+    "logo_b64":       "",
+    "logo_mime":      "image/png",
+    "color_v1":       "#2563EB",   # TOCARO
+    "color_v2":       "#16A34A",   # JUAN GABRIEL
+    "color_v3":       "#D97706",   # SIN ASIGNAR
+    "nombre_v1":      "TOCARO",
+    "nombre_v2":      "JUAN GABRIEL",
+    "nombre_v3":      "SIN ASIGNAR",
 }
 
 ORDEN_MESES = [
@@ -45,7 +50,42 @@ COLS_DISPLAY = [
     "VENTA","DESCUENTO","VENTA NETA","COSTO","UTILIDAD","% UTILIDAD","VENDEDOR",
 ]
 
-# ─── Parser ───────────────────────────────────────────────────────────────────
+# Valores internos fijos en la base de datos (no cambian con la config)
+_V1 = "TOCARO"
+_V2 = "JUAN GABRIEL"
+_V3 = "SIN ASIGNAR"
+
+# ─── Helpers de configuracion ─────────────────────────────────────────────────
+
+def cfg() -> dict:
+    return st.session_state["cfg"]
+
+def get_nombre_map() -> dict:
+    c = cfg()
+    return {_V1: c["nombre_v1"], _V2: c["nombre_v2"], _V3: c["nombre_v3"]}
+
+def get_colores() -> dict:
+    c = cfg()
+    return {c["nombre_v1"]: c["color_v1"],
+            c["nombre_v2"]: c["color_v2"],
+            c["nombre_v3"]: c["color_v3"]}
+
+def con_nombres(df: pd.DataFrame) -> pd.DataFrame:
+    """Agrega columna VENDEDOR_DISP con los nombres configurados."""
+    df = df.copy()
+    df["VENDEDOR_DISP"] = df["VENDEDOR"].map(get_nombre_map()).fillna(df["VENDEDOR"])
+    return df
+
+# ─── Page config ─────────────────────────────────────────────────────────────
+
+st.set_page_config(
+    page_title="Dashboard de Ventas",
+    page_icon=":bar_chart:",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ─── Parser TXT ───────────────────────────────────────────────────────────────
 
 def parse_num(s: str) -> float:
     try:
@@ -92,18 +132,16 @@ def detectar_metadata(lines) -> dict | None:
         fuente_m = re.search(r"FUENTE\s+(\d{2})", l)
         if date_m and fuente_m:
             _, month_str, year_2d = date_m.groups()
-            return {
-                "year":    2000 + int(year_2d),
-                "mes_num": int(month_str),
-                "fuente":  fuente_m.group(1),
-            }
+            return {"year": 2000 + int(year_2d),
+                    "mes_num": int(month_str),
+                    "fuente":  fuente_m.group(1)}
     year, mes_num, fuente = None, None, None
     for line in lines[:20]:
         l = line.strip()
-        date_m_solo = re.search(r"A\s*:\s*\d{1,2}/(\d{2})/(\d{2})", l)
-        if date_m_solo:
-            mes_num = int(date_m_solo.group(1))
-            year    = 2000 + int(date_m_solo.group(2))
+        dm = re.search(r"A\s*:\s*\d{1,2}/(\d{2})/(\d{2})", l)
+        if dm:
+            mes_num = int(dm.group(1))
+            year    = 2000 + int(dm.group(2))
         fm = re.search(r"FUENTE\s+(\d{2})", l)
         if fm:
             fuente = fm.group(1)
@@ -117,55 +155,38 @@ def parsear_contenido(lines, year: int, mes_num: int, fuente: str) -> list[dict]
     col_pos = find_col_positions(lines)
     if not col_pos:
         return records
-
     venta_start = col_pos["VENTA"]
-
     for line in lines:
         l = line.rstrip("\n\r")
         m = re.match(r"^(\d{8})\s+(\d{1,2}/\d{2}/\d{2})", l)
         if not m:
             continue
-
         cpbte   = m.group(1)
         fecha   = m.group(2)
         cliente = re.sub(r"\s+", " ", l[m.end():venta_start]).strip()
-
-        vals   = assign_cols(l, col_pos)
-        venta  = vals["VENTA"]
-        desc   = vals["DESCUENTO"]
-        costo  = vals["COSTO"]
-        tocaro = vals["TOCARO"]
-        juan   = vals["JUAN"]
-
+        vals    = assign_cols(l, col_pos)
+        venta   = vals["VENTA"]
+        desc    = vals["DESCUENTO"]
+        costo   = vals["COSTO"]
+        tocaro  = vals["TOCARO"]
+        juan    = vals["JUAN"]
         if venta == 0:
             continue
-
         if tocaro > 0:
-            vendedor = "TOCARO"
+            vendedor = _V1
         elif juan > 0:
-            vendedor = "JUAN GABRIEL"
+            vendedor = _V2
         else:
-            vendedor = "SIN ASIGNAR"
-
+            vendedor = _V3
         venta_neta = round(venta - desc, 2)
         utilidad   = round(venta_neta - costo, 2)
         pct_util   = round(utilidad / venta_neta, 4) if venta_neta else 0.0
-
         records.append({
-            "AÑO":        year,
-            "MES_NUM":    mes_num,
-            "MES":        NUM_A_MES[mes_num],
-            "FUENTE":     f"FUENTE {fuente}",
-            "COMPROBANTE": cpbte,
-            "FECHA":      fecha,
-            "CLIENTE":    cliente,
-            "VENTA":      round(venta, 2),
-            "DESCUENTO":  round(desc, 2),
-            "VENTA NETA": venta_neta,
-            "COSTO":      round(costo, 2),
-            "UTILIDAD":   utilidad,
-            "% UTILIDAD": pct_util,
-            "VENDEDOR":   vendedor,
+            "AÑO": year, "MES_NUM": mes_num, "MES": NUM_A_MES[mes_num],
+            "FUENTE": f"FUENTE {fuente}", "COMPROBANTE": cpbte, "FECHA": fecha,
+            "CLIENTE": cliente, "VENTA": round(venta, 2), "DESCUENTO": round(desc, 2),
+            "VENTA NETA": venta_neta, "COSTO": round(costo, 2),
+            "UTILIDAD": utilidad, "% UTILIDAD": pct_util, "VENDEDOR": vendedor,
         })
     return records
 
@@ -181,29 +202,22 @@ def _build_workbook(df: pd.DataFrame) -> Workbook:
     ws  = wb.active
     ws.title = "DATOS"
     df_out = df[COLS_DISPLAY].copy()
-
     HDR_COLOR  = "1F3864"
     COL_WIDTHS = {
         "AÑO":7,"MES":13,"FUENTE":11,"COMPROBANTE":14,"FECHA":10,
         "CLIENTE":36,"VENTA":16,"DESCUENTO":14,"VENTA NETA":16,
         "COSTO":16,"UTILIDAD":16,"% UTILIDAD":13,"VENDEDOR":16,
     }
-
     for ci, col in enumerate(COLS_DISPLAY, 1):
         c = ws.cell(row=1, column=ci, value=col)
         c.font      = Font(bold=True, color="FFFFFF", size=11, name="Calibri")
         c.fill      = PatternFill("solid", fgColor=HDR_COLOR)
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         ws.column_dimensions[get_column_letter(ci)].width = COL_WIDTHS.get(col, 14)
-
     ws.row_dimensions[1].height = 28
-
-    TOCARO_COLOR = "D6E4F0"
-    JG_COLOR     = "E2EFDA"
-
     for ri, row in enumerate(df_out.itertuples(index=False), 2):
         vendedor = row[-1]
-        bg   = TOCARO_COLOR if vendedor == "TOCARO" else (JG_COLOR if vendedor == "JUAN GABRIEL" else "FFFFFF")
+        bg   = "D6E4F0" if vendedor == _V1 else ("E2EFDA" if vendedor == _V2 else "FFFFFF")
         fill = PatternFill("solid", fgColor=bg)
         for ci, (col, value) in enumerate(zip(COLS_DISPLAY, row), 1):
             cell = ws.cell(row=ri, column=ci, value=value)
@@ -215,16 +229,14 @@ def _build_workbook(df: pd.DataFrame) -> Workbook:
             elif col == "% UTILIDAD":
                 cell.number_format = PCT_FMT
                 cell.alignment = Alignment(horizontal="right")
-
     last_row = len(df_out) + 1
     last_col = get_column_letter(len(COLS_DISPLAY))
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{last_col}1"
     tbl = Table(displayName="VentasGilsa", ref=f"A1:{last_col}{last_row}")
     tbl.tableStyleInfo = TableStyleInfo(
-        name="TableStyleMedium2",
-        showFirstColumn=False, showLastColumn=False,
-        showRowStripes=True,   showColumnStripes=False,
+        name="TableStyleMedium2", showFirstColumn=False, showLastColumn=False,
+        showRowStripes=True, showColumnStripes=False,
     )
     ws.add_table(tbl)
     return wb
@@ -242,15 +254,14 @@ def leer_excel(source) -> pd.DataFrame:
     df["CLIENTE_LIMPIO"] = df["CLIENTE"].apply(
         lambda x: re.sub(r"\s+\d+$", "", str(x)).strip()
     )
-    # Asegurar MES_NUM si falta (archivos viejos)
     if "MES_NUM" not in df.columns:
         df["MES_NUM"] = df["MES"].map(MES_A_NUM).fillna(0).astype(int)
     return df
 
 
-# ─── Session state ────────────────────────────────────────────────────────────
+# ─── Session state: datos ─────────────────────────────────────────────────────
 
-def _init():
+def _init_data():
     if "df_data" not in st.session_state:
         if DATA_FILE.exists():
             try:
@@ -259,9 +270,6 @@ def _init():
                 st.session_state["df_data"] = None
         else:
             st.session_state["df_data"] = None
-
-_init()
-
 
 def set_df(df: pd.DataFrame):
     df["MES"] = pd.Categorical(df["MES"], categories=ORDEN_MESES, ordered=True)
@@ -272,24 +280,49 @@ def set_df(df: pd.DataFrame):
     st.session_state["df_data"] = df
 
 
+# ─── Session state: configuracion ────────────────────────────────────────────
+
+def _init_cfg():
+    if "cfg" not in st.session_state:
+        loaded = {}
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, encoding="utf-8") as f:
+                    loaded = json.load(f)
+            except Exception:
+                loaded = {}
+        st.session_state["cfg"] = {**DEFAULT_CFG, **loaded}
+
+_init_data()
+_init_cfg()
+
+
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("GILSA S.A.S.")
+    c = cfg()
+
+    # Logo
+    if c["logo_b64"]:
+        logo_bytes = base64.b64decode(c["logo_b64"])
+        st.image(logo_bytes, use_container_width=True)
+
+    st.title(c["empresa_nombre"])
+    if c["empresa_nit"]:
+        st.caption(f"NIT: {c['empresa_nit']}")
+
     st.markdown("---")
     pagina = st.radio(
         "Navegacion",
-        ["Dashboard", "Importar archivos TXT"],
+        ["Dashboard", "Importar archivos TXT", "Configuracion"],
         label_visibility="collapsed",
     )
     st.markdown("---")
 
-    # Descargar datos actuales
     if st.session_state["df_data"] is not None:
-        excel_bytes = df_a_excel_bytes(st.session_state["df_data"])
         st.download_button(
             label="Descargar datos (Excel)",
-            data=excel_bytes,
+            data=df_a_excel_bytes(st.session_state["df_data"]),
             file_name="VENTAS_GILSA_CONSOLIDADO.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
@@ -300,16 +333,151 @@ with st.sidebar:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PAGINA: CONFIGURACION
+# ══════════════════════════════════════════════════════════════════════════════
+
+if pagina == "Configuracion":
+
+    st.title("Configuracion")
+
+    c = cfg()
+
+    tab_emp, tab_vend, tab_backup = st.tabs(
+        ["Empresa", "Vendedores", "Guardar / Restaurar"]
+    )
+
+    # ── Tab: Empresa ──────────────────────────────────────────────────────────
+    with tab_emp:
+        st.subheader("Datos de la empresa")
+
+        col_form, col_prev = st.columns([2, 1])
+
+        with col_form:
+            nuevo_nombre = st.text_input("Nombre de la empresa", value=c["empresa_nombre"])
+            nuevo_nit    = st.text_input("NIT", value=c["empresa_nit"])
+
+            st.markdown("**Logo**")
+            logo_file = st.file_uploader(
+                "Sube una imagen (PNG, JPG o SVG)",
+                type=["png","jpg","jpeg","svg"],
+                key="logo_uploader",
+            )
+
+            col_g, col_b = st.columns(2)
+            guardar_emp = col_g.button("Guardar cambios", type="primary", key="btn_emp")
+            if c["logo_b64"] and col_b.button("Quitar logo", key="btn_rm_logo"):
+                st.session_state["cfg"]["logo_b64"]  = ""
+                st.session_state["cfg"]["logo_mime"] = ""
+                st.rerun()
+
+        with col_prev:
+            st.markdown("**Vista previa**")
+            if logo_file:
+                st.image(logo_file, use_container_width=True)
+            elif c["logo_b64"]:
+                st.image(base64.b64decode(c["logo_b64"]), use_container_width=True)
+            else:
+                st.markdown("_(sin logo)_")
+            st.markdown(f"**{nuevo_nombre}**")
+            if nuevo_nit:
+                st.caption(f"NIT: {nuevo_nit}")
+
+        if guardar_emp:
+            st.session_state["cfg"]["empresa_nombre"] = nuevo_nombre
+            st.session_state["cfg"]["empresa_nit"]    = nuevo_nit
+            if logo_file:
+                raw  = logo_file.read()
+                mime = logo_file.type or "image/png"
+                st.session_state["cfg"]["logo_b64"]  = base64.b64encode(raw).decode()
+                st.session_state["cfg"]["logo_mime"] = mime
+            st.success("Cambios guardados. La barra lateral se actualizara al recargar.")
+            st.rerun()
+
+    # ── Tab: Vendedores ───────────────────────────────────────────────────────
+    with tab_vend:
+        st.subheader("Nombres y colores de vendedores")
+        st.caption(
+            "Los nombres que asignes aqui aparecen en graficas, tablas y filtros. "
+            "Los datos internos no cambian."
+        )
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.markdown("**Vendedor 1** _(TOCARO)_")
+            n1 = st.text_input("Nombre", value=c["nombre_v1"], key="n1")
+            c1 = st.color_picker("Color", value=c["color_v1"], key="c1")
+
+        with col2:
+            st.markdown("**Vendedor 2** _(JUAN GABRIEL)_")
+            n2 = st.text_input("Nombre", value=c["nombre_v2"], key="n2")
+            c2 = st.color_picker("Color", value=c["color_v2"], key="c2")
+
+        with col3:
+            st.markdown("**Sin asignar**")
+            n3 = st.text_input("Nombre", value=c["nombre_v3"], key="n3")
+            c3 = st.color_picker("Color", value=c["color_v3"], key="c3")
+
+        if st.button("Guardar cambios de vendedores", type="primary"):
+            st.session_state["cfg"].update({
+                "nombre_v1": n1, "color_v1": c1,
+                "nombre_v2": n2, "color_v2": c2,
+                "nombre_v3": n3, "color_v3": c3,
+            })
+            st.success("Cambios guardados.")
+            st.rerun()
+
+    # ── Tab: Guardar / Restaurar ──────────────────────────────────────────────
+    with tab_backup:
+        st.subheader("Persistir la configuracion")
+        st.markdown(
+            "La configuracion se guarda **solo en esta sesion**. "
+            "Para que persista entre sesiones, descarga el archivo `config.json` "
+            "y subelo a tu repositorio de GitHub junto con `dashboard_ventas.py`."
+        )
+
+        # Exportar
+        cfg_export = {k: v for k, v in cfg().items()}
+        st.download_button(
+            label="Descargar config.json",
+            data=json.dumps(cfg_export, ensure_ascii=False, indent=2).encode("utf-8"),
+            file_name="config.json",
+            mime="application/json",
+        )
+
+        st.markdown("---")
+
+        # Importar
+        st.markdown("**Restaurar desde archivo**")
+        cfg_file = st.file_uploader("Sube tu config.json", type=["json"], key="cfg_uploader")
+        if cfg_file:
+            if st.button("Aplicar configuracion", type="primary"):
+                try:
+                    loaded = json.loads(cfg_file.read().decode("utf-8"))
+                    st.session_state["cfg"] = {**DEFAULT_CFG, **loaded}
+                    st.success("Configuracion aplicada correctamente.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al leer el archivo: {e}")
+
+        st.markdown("---")
+        st.markdown("**Restablecer valores por defecto**")
+        if st.button("Restablecer todo", type="secondary"):
+            st.session_state["cfg"] = dict(DEFAULT_CFG)
+            st.success("Configuracion restablecida.")
+            st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGINA: IMPORTAR
 # ══════════════════════════════════════════════════════════════════════════════
 
-if pagina == "Importar archivos TXT":
+elif pagina == "Importar archivos TXT":
 
     st.title("Importar datos")
 
     tab_txt, tab_xls = st.tabs(["Subir archivos TXT", "Cargar Excel guardado"])
 
-    # ── Sub-tab: TXT ──────────────────────────────────────────────────────────
     with tab_txt:
         st.markdown(
             "Sube uno o varios archivos `.txt` del sistema COBOL. "
@@ -329,8 +497,8 @@ if pagina == "Importar archivos TXT":
 
             for archivo in archivos:
                 contenido = archivo.read().decode("latin-1", errors="replace")
-                lines = contenido.splitlines()
-                meta  = detectar_metadata(lines)
+                lines     = contenido.splitlines()
+                meta      = detectar_metadata(lines)
 
                 if meta:
                     filas_preview.append({
@@ -338,9 +506,7 @@ if pagina == "Importar archivos TXT":
                         "Anio":    meta["year"],
                         "Mes":     NUM_A_MES.get(meta["mes_num"], "?"),
                         "Fuente":  f"FUENTE {meta['fuente']}",
-                        "_lines":  lines,
-                        "_meta":   meta,
-                        "_ok":     True,
+                        "_lines":  lines, "_meta": meta, "_ok": True,
                     })
                 else:
                     filas_preview.append({
@@ -348,9 +514,7 @@ if pagina == "Importar archivos TXT":
                         "Anio":    "No detectado",
                         "Mes":     "No detectado",
                         "Fuente":  "No detectado",
-                        "_lines":  lines,
-                        "_meta":   None,
-                        "_ok":     False,
+                        "_lines":  lines, "_meta": None, "_ok": False,
                     })
 
             df_preview = pd.DataFrame([
@@ -374,10 +538,7 @@ if pagina == "Importar archivos TXT":
             st.subheader("Opciones")
             modo = st.radio(
                 "Que hacer con los datos existentes?",
-                [
-                    "Agregar (sin duplicar periodos)",
-                    "Reemplazar completamente",
-                ],
+                ["Agregar (sin duplicar periodos)", "Reemplazar completamente"],
                 key="modo_txt",
             )
 
@@ -415,7 +576,7 @@ if pagina == "Importar archivos TXT":
                             zip(df_nuevo["AÑO"], df_nuevo["MES_NUM"],
                                 df_nuevo["FUENTE"].str.replace("FUENTE ", "", regex=False))
                         )
-                        mask_eliminar = df_actual.apply(
+                        mask = df_actual.apply(
                             lambda r: (
                                 r["AÑO"],
                                 MES_A_NUM.get(str(r["MES"]), 0),
@@ -423,31 +584,28 @@ if pagina == "Importar archivos TXT":
                             ) in periodos_nuevos,
                             axis=1,
                         )
-                        df_base  = df_actual[~mask_eliminar].copy()
-                        df_final = pd.concat([df_base, df_nuevo], ignore_index=True)
+                        df_final = pd.concat(
+                            [df_actual[~mask], df_nuevo], ignore_index=True
+                        )
                     else:
                         df_final = df_nuevo
 
                     df_final = df_final.sort_values(
                         ["AÑO","MES_NUM","FUENTE","COMPROBANTE"]
                     ).reset_index(drop=True)
-
                     set_df(df_final)
 
                 st.success(
                     f"Importacion completada. "
-                    f"**{len(df_nuevo):,}** facturas nuevas. "
-                    f"**{len(df_final):,}** facturas en total."
+                    f"**{len(df_nuevo):,}** facturas nuevas — "
+                    f"**{len(df_final):,}** en total."
                 )
                 for linea in log:
                     st.text(linea)
-
                 st.info(
-                    "Usa el boton **Descargar datos (Excel)** en la barra lateral "
-                    "para guardar una copia. Podras re-subirla la proxima sesion."
+                    "Usa **Descargar datos (Excel)** en la barra lateral para guardar una copia."
                 )
 
-    # ── Sub-tab: Excel ────────────────────────────────────────────────────────
     with tab_xls:
         st.markdown(
             "Sube el archivo Excel que descargaste en una sesion anterior "
@@ -471,16 +629,17 @@ if pagina == "Importar archivos TXT":
                     try:
                         df_xls = leer_excel(xls_file)
                         if "Combinar" in modo_xls and st.session_state.get("df_data") is not None:
-                            df_final = pd.concat(
-                                [st.session_state["df_data"], df_xls], ignore_index=True
-                            ).drop_duplicates(
-                                subset=["AÑO","MES_NUM","FUENTE","COMPROBANTE"]
-                            ).sort_values(["AÑO","MES_NUM","FUENTE","COMPROBANTE"]).reset_index(drop=True)
+                            df_final = (
+                                pd.concat([st.session_state["df_data"], df_xls], ignore_index=True)
+                                .drop_duplicates(subset=["AÑO","MES_NUM","FUENTE","COMPROBANTE"])
+                                .sort_values(["AÑO","MES_NUM","FUENTE","COMPROBANTE"])
+                                .reset_index(drop=True)
+                            )
                             set_df(df_final)
                         else:
                             set_df(df_xls)
                         st.success(
-                            f"Excel cargado correctamente. "
+                            f"Excel cargado. "
                             f"**{len(st.session_state['df_data']):,}** facturas en memoria."
                         )
                     except Exception as e:
@@ -503,7 +662,9 @@ else:
         )
         st.stop()
 
-    df_full = df_data
+    df_full = con_nombres(df_data)
+    COLORES = get_colores()
+    c       = cfg()
 
     # ── Filtros sidebar ───────────────────────────────────────────────────────
     with st.sidebar:
@@ -518,11 +679,16 @@ else:
         fuentes_disp = sorted(df_full["FUENTE"].unique())
         sel_fuente = st.multiselect("Fuente", fuentes_disp, default=fuentes_disp)
 
-        vendedores_disp = sorted(df_full["VENDEDOR"].unique())
-        sel_vendedor = st.multiselect("Vendedor", vendedores_disp, default=vendedores_disp)
+        # Filtro vendedor usando nombres configurados
+        vendedores_raw    = sorted(df_full["VENDEDOR"].unique())
+        nombre_map        = get_nombre_map()
+        vendedores_labels = [nombre_map.get(v, v) for v in vendedores_raw]
+        inv_nombre_map    = {v: k for k, v in nombre_map.items()}
+        sel_vend_labels   = st.multiselect("Vendedor", vendedores_labels, default=vendedores_labels)
+        sel_vendedor      = [inv_nombre_map.get(lbl, lbl) for lbl in sel_vend_labels]
 
         st.markdown("---")
-        st.caption("GILSA S.A.S. - NIT 900.007.450-8")
+        st.caption(f"{c['empresa_nombre']} · NIT {c['empresa_nit']}")
 
     df = df_full[
         df_full["AÑO"].isin(sel_anio) &
@@ -532,7 +698,7 @@ else:
     ].copy()
 
     # ── KPIs ──────────────────────────────────────────────────────────────────
-    st.title("Dashboard de Ventas - GILSA S.A.S.")
+    st.title(f"Dashboard de Ventas — {c['empresa_nombre']}")
     st.markdown(f"Mostrando **{len(df):,}** facturas")
     st.markdown("---")
 
@@ -562,17 +728,17 @@ else:
         col_a, col_b = st.columns(2)
 
         mes_vend = (
-            df.groupby(["AÑO","MES","VENDEDOR"], observed=True)
+            df.groupby(["AÑO","MES","VENDEDOR_DISP"], observed=True)
             .agg(UTILIDAD=("UTILIDAD","sum"), VENTA_NETA=("VENTA NETA","sum"))
             .reset_index()
         )
         mes_vend["MES_LABEL"] = mes_vend["AÑO"].astype(str) + " " + mes_vend["MES"].astype(str)
 
         fig1 = px.bar(
-            mes_vend, x="MES_LABEL", y="UTILIDAD", color="VENDEDOR",
+            mes_vend, x="MES_LABEL", y="UTILIDAD", color="VENDEDOR_DISP",
             color_discrete_map=COLORES, barmode="group",
             title="Utilidad por Mes y Vendedor",
-            labels={"MES_LABEL":"Mes","UTILIDAD":"Utilidad ($)"},
+            labels={"MES_LABEL":"Mes","UTILIDAD":"Utilidad ($)","VENDEDOR_DISP":"Vendedor"},
         )
         fig1.update_layout(xaxis_tickangle=-45, legend_title="Vendedor", height=420)
         col_a.plotly_chart(fig1, use_container_width=True)
@@ -612,7 +778,7 @@ else:
     # ── TAB 2: POR VENDEDOR ───────────────────────────────────────────────────
     with tab2:
         vend_res = (
-            df.groupby("VENDEDOR")
+            df.groupby("VENDEDOR_DISP")
             .agg(FACTURAS=("COMPROBANTE","count"), VENTA_NETA=("VENTA NETA","sum"),
                  COSTO=("COSTO","sum"), UTILIDAD=("UTILIDAD","sum"))
             .reset_index()
@@ -621,21 +787,21 @@ else:
 
         col1, col2, col3 = st.columns(3)
 
-        fig_pie = px.pie(vend_res, names="VENDEDOR", values="UTILIDAD",
-                         color="VENDEDOR", color_discrete_map=COLORES,
+        fig_pie = px.pie(vend_res, names="VENDEDOR_DISP", values="UTILIDAD",
+                         color="VENDEDOR_DISP", color_discrete_map=COLORES,
                          title="Participacion en Utilidad", hole=0.45)
         col1.plotly_chart(fig_pie, use_container_width=True)
 
-        fig_pie2 = px.pie(vend_res, names="VENDEDOR", values="VENTA_NETA",
-                          color="VENDEDOR", color_discrete_map=COLORES,
+        fig_pie2 = px.pie(vend_res, names="VENDEDOR_DISP", values="VENTA_NETA",
+                          color="VENDEDOR_DISP", color_discrete_map=COLORES,
                           title="Participacion en Venta Neta", hole=0.45)
         col2.plotly_chart(fig_pie2, use_container_width=True)
 
-        fig_marg = px.bar(vend_res, x="VENDEDOR", y="PCT_MARGEN",
-                          color="VENDEDOR", color_discrete_map=COLORES,
+        fig_marg = px.bar(vend_res, x="VENDEDOR_DISP", y="PCT_MARGEN",
+                          color="VENDEDOR_DISP", color_discrete_map=COLORES,
                           title="% Margen por Vendedor",
                           text=vend_res["PCT_MARGEN"].map(lambda x: f"{x:.1f}%"),
-                          labels={"PCT_MARGEN":"% Margen"})
+                          labels={"PCT_MARGEN":"% Margen","VENDEDOR_DISP":"Vendedor"})
         fig_marg.update_traces(textposition="outside")
         fig_marg.update_layout(showlegend=False, height=380)
         col3.plotly_chart(fig_marg, use_container_width=True)
@@ -651,16 +817,16 @@ else:
 
         st.subheader("Evolucion mensual por vendedor")
         evol = (
-            df.groupby(["AÑO","MES","VENDEDOR"], observed=True)
+            df.groupby(["AÑO","MES","VENDEDOR_DISP"], observed=True)
             .agg(UTILIDAD=("UTILIDAD","sum"), VENTA_NETA=("VENTA NETA","sum"))
             .reset_index()
         )
         evol["MES_LABEL"] = evol["AÑO"].astype(str) + " " + evol["MES"].astype(str)
         evol["PCT"] = evol["UTILIDAD"] / evol["VENTA_NETA"] * 100
-        fig_evol = px.line(evol, x="MES_LABEL", y="PCT", color="VENDEDOR",
+        fig_evol = px.line(evol, x="MES_LABEL", y="PCT", color="VENDEDOR_DISP",
                            color_discrete_map=COLORES, markers=True,
                            title="% Margen mensual por Vendedor",
-                           labels={"MES_LABEL":"Mes","PCT":"% Margen","VENDEDOR":"Vendedor"})
+                           labels={"MES_LABEL":"Mes","PCT":"% Margen","VENDEDOR_DISP":"Vendedor"})
         fig_evol.update_layout(xaxis_tickangle=-45, height=400)
         st.plotly_chart(fig_evol, use_container_width=True)
 
@@ -670,9 +836,10 @@ else:
         with c1:
             n_top        = st.slider("Top N clientes", 5, 30, 15)
             metrica      = st.radio("Ordenar por", ["Utilidad","Venta Neta","% Margen"])
-            vendedor_cli = st.selectbox("Vendedor", ["TODOS"] + sorted(df["VENDEDOR"].unique()))
+            vend_opts    = ["TODOS"] + sorted(df["VENDEDOR_DISP"].unique())
+            vendedor_cli = st.selectbox("Vendedor", vend_opts)
 
-        df_cli = df.copy() if vendedor_cli == "TODOS" else df[df["VENDEDOR"] == vendedor_cli].copy()
+        df_cli = df.copy() if vendedor_cli == "TODOS" else df[df["VENDEDOR_DISP"] == vendedor_cli].copy()
 
         cli_grp = (
             df_cli.groupby("CLIENTE_LIMPIO")
@@ -691,13 +858,13 @@ else:
                 top_cli.sort_values(col_ord[metrica]),
                 x=col_ord[metrica], y="CLIENTE_LIMPIO", orientation="h",
                 color="PCT_MARGEN", color_continuous_scale="Blues",
-                title=f"Top {n_top} clientes - {metrica}",
+                title=f"Top {n_top} clientes — {metrica}",
                 labels={"CLIENTE_LIMPIO":"","PCT_MARGEN":"% Margen"},
             )
             fig_cli.update_layout(height=max(400, n_top * 28))
             st.plotly_chart(fig_cli, use_container_width=True)
 
-        st.subheader(f"Clientes con menor % margen - {vendedor_cli}")
+        st.subheader(f"Clientes con menor % margen — {vendedor_cli}")
         menor = cli_grp.sort_values("PCT_MARGEN").head(20)
         menor_show = menor[["CLIENTE_LIMPIO","FACTURAS","VENTA_NETA","UTILIDAD","PCT_MARGEN"]].copy()
         menor_show["VENTA_NETA"] = menor_show["VENTA_NETA"].map(lambda x: f"${x:,.0f}")
@@ -716,10 +883,11 @@ else:
 
         cols_mostrar = [
             "AÑO","MES","FUENTE","COMPROBANTE","FECHA","CLIENTE",
-            "VENTA","DESCUENTO","VENTA NETA","COSTO","UTILIDAD","% UTILIDAD","VENDEDOR",
+            "VENTA","DESCUENTO","VENTA NETA","COSTO","UTILIDAD","% UTILIDAD","VENDEDOR_DISP",
         ]
         df_show = df_det[cols_mostrar].copy()
         df_show["% UTILIDAD"] = (df_show["% UTILIDAD"] * 100).round(2).astype(str) + "%"
+        df_show = df_show.rename(columns={"VENDEDOR_DISP": "VENDEDOR"})
 
         st.dataframe(
             df_show, use_container_width=True, hide_index=True, height=500,
