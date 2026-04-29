@@ -1,5 +1,5 @@
 """
-Dashboard de Ventas - GILSA S.A.S.
+Dashboard de Ventas
 Ejecutar con:  streamlit run dashboard_ventas.py
 """
 
@@ -481,7 +481,7 @@ elif pagina == "Importar archivos TXT":
     with tab_txt:
         st.markdown(
             "Sube uno o varios archivos `.txt` del sistema COBOL. "
-            "La app detecta automaticamente el **anio, mes y fuente** desde el encabezado."
+            "La app detecta automaticamente el **año, mes y fuente** desde el encabezado."
         )
 
         archivos = st.file_uploader(
