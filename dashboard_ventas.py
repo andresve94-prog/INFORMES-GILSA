@@ -1,5 +1,5 @@
 """
-Dashboard de Ventas
+Dashboard de Ventas - GILSA S.A.S.
 Ejecutar con:  streamlit run dashboard_ventas.py
 """
 
@@ -7,6 +7,7 @@ import re
 import io
 import json
 import base64
+import requests
 from pathlib import Path
 
 import pandas as pd
@@ -248,6 +249,46 @@ def df_a_excel_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+# ─── GitHub auto-sync ─────────────────────────────────────────────────────────
+
+def _github_ok() -> bool:
+    try:
+        return bool(st.secrets.get("GITHUB_TOKEN") and st.secrets.get("GITHUB_REPO"))
+    except Exception:
+        return False
+
+
+def guardar_en_github(df: pd.DataFrame) -> tuple[bool, str]:
+    try:
+        token  = st.secrets["GITHUB_TOKEN"]
+        repo   = st.secrets["GITHUB_REPO"]
+        branch = st.secrets.get("GITHUB_BRANCH", "main")
+    except Exception:
+        return False, "Secrets no configurados en Streamlit Cloud."
+
+    url     = f"https://api.github.com/repos/{repo}/contents/VENTAS_GILSA_CONSOLIDADO.xlsx"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    r = requests.get(url, headers=headers, params={"ref": branch})
+    sha = r.json().get("sha") if r.status_code == 200 else None
+
+    payload = {
+        "message": "Actualizar datos desde la app",
+        "content": base64.b64encode(df_a_excel_bytes(df)).decode(),
+        "branch":  branch,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    r2 = requests.put(url, headers=headers, json=payload)
+    if r2.status_code in (200, 201):
+        return True, "Datos guardados en GitHub correctamente."
+    return False, f"Error GitHub {r2.status_code}: {r2.json().get('message', '')}"
+
+
 def leer_excel(source) -> pd.DataFrame:
     df = pd.read_excel(source, sheet_name="DATOS")
     df["MES"] = pd.Categorical(df["MES"], categories=ORDEN_MESES, ordered=True)
@@ -320,11 +361,21 @@ with st.sidebar:
     st.markdown("---")
 
     if st.session_state["df_data"] is not None:
+        if _github_ok():
+            st.success("GitHub conectado")
+            if st.button("Sincronizar con GitHub", use_container_width=True):
+                with st.spinner("Guardando..."):
+                    ok, msg = guardar_en_github(st.session_state["df_data"])
+                st.success(msg) if ok else st.error(msg)
+        else:
+            st.warning("GitHub no configurado")
+
         st.download_button(
-            label="Descargar datos (Excel)",
+            label="Descargar Excel (respaldo)",
             data=df_a_excel_bytes(st.session_state["df_data"]),
             file_name="VENTAS_GILSA_CONSOLIDADO.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
         )
     else:
         st.info("Sin datos cargados.")
@@ -481,7 +532,7 @@ elif pagina == "Importar archivos TXT":
     with tab_txt:
         st.markdown(
             "Sube uno o varios archivos `.txt` del sistema COBOL. "
-            "La app detecta automaticamente el **año, mes y fuente** desde el encabezado."
+            "La app detecta automaticamente el **anio, mes y fuente** desde el encabezado."
         )
 
         archivos = st.file_uploader(
@@ -595,6 +646,11 @@ elif pagina == "Importar archivos TXT":
                     ).reset_index(drop=True)
                     set_df(df_final)
 
+                    # Auto-sync a GitHub si está configurado
+                    github_msg = None
+                    if _github_ok():
+                        ok, github_msg = guardar_en_github(df_final)
+
                 st.success(
                     f"Importacion completada. "
                     f"**{len(df_nuevo):,}** facturas nuevas — "
@@ -602,9 +658,15 @@ elif pagina == "Importar archivos TXT":
                 )
                 for linea in log:
                     st.text(linea)
-                st.info(
-                    "Usa **Descargar datos (Excel)** en la barra lateral para guardar una copia."
-                )
+
+                if github_msg:
+                    st.success(github_msg) if ok else st.warning(
+                        github_msg + " — Descarga el Excel manualmente como respaldo."
+                    )
+                else:
+                    st.info(
+                        "GitHub no configurado. Usa **Descargar Excel** en la barra lateral para guardar una copia."
+                    )
 
     with tab_xls:
         st.markdown(
@@ -638,10 +700,18 @@ elif pagina == "Importar archivos TXT":
                             set_df(df_final)
                         else:
                             set_df(df_xls)
+
+                        df_actual = st.session_state["df_data"]
+                        github_msg = None
+                        if _github_ok():
+                            ok, github_msg = guardar_en_github(df_actual)
+
                         st.success(
                             f"Excel cargado. "
-                            f"**{len(st.session_state['df_data']):,}** facturas en memoria."
+                            f"**{len(df_actual):,}** facturas en memoria."
                         )
+                        if github_msg:
+                            st.success(github_msg) if ok else st.warning(github_msg)
                     except Exception as e:
                         st.error(f"Error al leer el Excel: {e}")
 
