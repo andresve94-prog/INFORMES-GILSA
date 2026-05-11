@@ -302,15 +302,33 @@ def leer_excel(source) -> pd.DataFrame:
 
 # ─── Session state: datos ─────────────────────────────────────────────────────
 
+def _cargar_desde_github() -> pd.DataFrame | None:
+    try:
+        token  = st.secrets["GITHUB_TOKEN"]
+        repo   = st.secrets["GITHUB_REPO"]
+        branch = st.secrets.get("GITHUB_BRANCH", "main")
+        url     = f"https://api.github.com/repos/{repo}/contents/VENTAS_GILSA_CONSOLIDADO.xlsx"
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+        r = requests.get(url, headers=headers, params={"ref": branch})
+        if r.status_code == 200:
+            content = base64.b64decode(r.json()["content"])
+            return leer_excel(io.BytesIO(content))
+    except Exception:
+        pass
+    return None
+
+
 def _init_data():
     if "df_data" not in st.session_state:
-        if DATA_FILE.exists():
+        df = None
+        if _github_ok():
+            df = _cargar_desde_github()
+        if df is None and DATA_FILE.exists():
             try:
-                st.session_state["df_data"] = leer_excel(DATA_FILE)
+                df = leer_excel(DATA_FILE)
             except Exception:
-                st.session_state["df_data"] = None
-        else:
-            st.session_state["df_data"] = None
+                df = None
+        st.session_state["df_data"] = df
 
 def set_df(df: pd.DataFrame):
     df["MES"] = pd.Categorical(df["MES"], categories=ORDEN_MESES, ordered=True)

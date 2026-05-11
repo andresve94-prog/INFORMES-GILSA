@@ -1,0 +1,19 @@
+# Archivos del sistema COBOL
+F25*
+NADA
+*.SA2
+
+# Carpetas de ventas fuente
+VENTAS 2025*/
+VENTAS 2026*/
+
+# Archivos auxiliares
+generar_excel.py
+VENTAS_GILSA_CONSOLIDADO_CAVSYSTEMS.xlsx
+
+# Claude
+.claude/
+
+# Python
+__pycache__/
+*.pyc
