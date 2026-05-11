@@ -678,9 +678,10 @@ elif pagina == "Importar archivos TXT":
                     st.text(linea)
 
                 if github_msg:
-                    st.success(github_msg) if ok else st.warning(
-                        github_msg + " — Descarga el Excel manualmente como respaldo."
-                    )
+                    if ok:
+                        st.success(github_msg)
+                    else:
+                        st.warning(github_msg + " — Descarga el Excel manualmente como respaldo.")
                 else:
                     st.info(
                         "GitHub no configurado. Usa **Descargar Excel** en la barra lateral para guardar una copia."
@@ -729,7 +730,10 @@ elif pagina == "Importar archivos TXT":
                             f"**{len(df_actual):,}** facturas en memoria."
                         )
                         if github_msg:
-                            st.success(github_msg) if ok else st.warning(github_msg)
+                            if ok:
+                                st.success(github_msg)
+                            else:
+                                st.warning(github_msg)
                     except Exception as e:
                         st.error(f"Error al leer el Excel: {e}")
 
