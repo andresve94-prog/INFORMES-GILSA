@@ -258,6 +258,40 @@ def _github_ok() -> bool:
         return False
 
 
+def diagnosticar_github() -> dict:
+    info = {"token_ok": False, "repo_ok": False, "write_ok": False, "usuario": "", "repo": "", "detalle": ""}
+    try:
+        token  = st.secrets["GITHUB_TOKEN"]
+        repo   = st.secrets["GITHUB_REPO"]
+        info["repo"] = repo
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+
+        r_user = requests.get("https://api.github.com/user", headers=headers)
+        if r_user.status_code != 200:
+            info["detalle"] = f"Token invalido o expirado (status {r_user.status_code})"
+            return info
+        info["token_ok"] = True
+        info["usuario"]  = r_user.json().get("login", "")
+
+        r_repo = requests.get(f"https://api.github.com/repos/{repo}", headers=headers)
+        if r_repo.status_code == 404:
+            info["detalle"] = f"Repo '{repo}' no encontrado. Verifica que sea 'usuario/nombre-repo'"
+            return info
+        if r_repo.status_code != 200:
+            info["detalle"] = f"Error al acceder al repo: status {r_repo.status_code}"
+            return info
+        info["repo_ok"]  = True
+        perms = r_repo.json().get("permissions", {})
+        info["write_ok"] = perms.get("push", False)
+        if not info["write_ok"]:
+            info["detalle"] = "El token no tiene permiso de escritura (push) en el repo"
+    except KeyError as e:
+        info["detalle"] = f"Secret faltante: {e}"
+    except Exception as e:
+        info["detalle"] = str(e)
+    return info
+
+
 def guardar_en_github(df: pd.DataFrame) -> tuple[bool, str]:
     try:
         token  = st.secrets["GITHUB_TOKEN"]
@@ -286,7 +320,7 @@ def guardar_en_github(df: pd.DataFrame) -> tuple[bool, str]:
     r2 = requests.put(url, headers=headers, json=payload)
     if r2.status_code in (200, 201):
         return True, "Datos guardados en GitHub correctamente."
-    return False, f"Error GitHub {r2.status_code}: {r2.json().get('message', '')}"
+    return False, f"Error GitHub {r2.status_code}: {r2.json().get('message', '')} | Repo: {repo}"
 
 
 def leer_excel(source) -> pd.DataFrame:
@@ -411,8 +445,8 @@ if pagina == "Configuracion":
 
     c = cfg()
 
-    tab_emp, tab_vend, tab_backup = st.tabs(
-        ["Empresa", "Vendedores", "Guardar / Restaurar"]
+    tab_emp, tab_vend, tab_backup, tab_github = st.tabs(
+        ["Empresa", "Vendedores", "Guardar / Restaurar", "GitHub"]
     )
 
     # ── Tab: Empresa ──────────────────────────────────────────────────────────
@@ -535,6 +569,43 @@ if pagina == "Configuracion":
             st.session_state["cfg"] = dict(DEFAULT_CFG)
             st.success("Configuracion restablecida.")
             st.rerun()
+
+    # ── Tab: GitHub ───────────────────────────────────────────────────────────
+    with tab_github:
+        st.subheader("Diagnostico de conexion con GitHub")
+        st.markdown("Usa este panel para verificar que los secrets esten correctamente configurados.")
+
+        if st.button("Probar conexion GitHub", type="primary"):
+            with st.spinner("Verificando..."):
+                diag = diagnosticar_github()
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Token", "OK" if diag["token_ok"] else "FALLO",
+                        delta="valido" if diag["token_ok"] else "invalido o expirado",
+                        delta_color="normal" if diag["token_ok"] else "inverse")
+            col2.metric("Repo", "OK" if diag["repo_ok"] else "FALLO",
+                        delta=diag["repo"] if diag["repo"] else "no configurado",
+                        delta_color="normal" if diag["repo_ok"] else "inverse")
+            col3.metric("Escritura", "OK" if diag["write_ok"] else "FALLO",
+                        delta="tiene permisos" if diag["write_ok"] else "sin permisos push",
+                        delta_color="normal" if diag["write_ok"] else "inverse")
+
+            if diag["usuario"]:
+                st.info(f"Usuario GitHub autenticado: **{diag['usuario']}**")
+
+            if diag["detalle"]:
+                st.error(f"Problema detectado: {diag['detalle']}")
+            elif diag["token_ok"] and diag["repo_ok"] and diag["write_ok"]:
+                st.success("Todo correcto. La sincronizacion automatica funcionara.")
+
+        st.markdown("---")
+        st.markdown("**Formato correcto de los secrets en Streamlit Cloud:**")
+        st.code(
+            'GITHUB_TOKEN = "ghp_XXXXXXXXXXXXXXXXXXXX"\n'
+            'GITHUB_REPO  = "andresve94-prog/INFORMES-GILSA"\n'
+            'GITHUB_BRANCH = "main"',
+            language="toml",
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
